@@ -25,7 +25,7 @@ class QuotaSet(base.Resource):
         return self.tenant_id
 
     def update(self, *args, **kwargs):
-        self.manager.update(self.tenant_id, *args, **kwargs)
+        return self.manager.update(self.tenant_id, *args, **kwargs)
 
 
 class QuotaSetManager(base.ManagerWithFind):
@@ -37,27 +37,33 @@ class QuotaSetManager(base.ManagerWithFind):
         return self._get("/os-quota-sets/%s" % (tenant_id), "quota_set")
 
     def update(self, tenant_id, metadata_items=None,
-               injected_file_content_bytes=None, volumes=None, gigabytes=None,
+               injected_file_content_bytes=None, injected_file_path_bytes=None,
+               volumes=None, gigabytes=None,
                ram=None, floating_ips=None, instances=None,
-               injected_files=None, cores=None):
+               injected_files=None, cores=None, key_pairs=None,
+               security_groups=None, security_group_rules=None):
 
         body = {'quota_set': {
                 'tenant_id': tenant_id,
                 'metadata_items': metadata_items,
+                'key_pairs': key_pairs,
                 'injected_file_content_bytes': injected_file_content_bytes,
+                'injected_file_path_bytes': injected_file_path_bytes,
                 'volumes': volumes,
                 'gigabytes': gigabytes,
                 'ram': ram,
                 'floating_ips': floating_ips,
                 'instances': instances,
                 'injected_files': injected_files,
-                'cores': cores}}
+                'cores': cores,
+                'security_groups': security_groups,
+                'security_group_rules': security_group_rules}}
 
         for key in body['quota_set'].keys():
             if body['quota_set'][key] is None:
                 body['quota_set'].pop(key)
 
-        self._update('/os-quota-sets/%s' % (tenant_id), body)
+        return self._update('/os-quota-sets/%s' % tenant_id, body, 'quota_set')
 
     def defaults(self, tenant_id):
         return self._get('/os-quota-sets/%s/defaults' % tenant_id,

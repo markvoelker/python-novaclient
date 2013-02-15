@@ -1,6 +1,7 @@
 # Copyright 2010 Jacob Kaplan-Moss
 
 # Copyright 2011 OpenStack LLC.
+# Copyright 2012 IBM Corp.
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -15,49 +16,61 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import datetime
 import os
 import mock
 import sys
 import tempfile
 
+import fixtures
+
 import novaclient.shell
 import novaclient.client
 from novaclient import exceptions
+from novaclient.openstack.common import timeutils
 from tests.v1_1 import fakes
 from tests import utils
 
 
-class ShellTest(utils.TestCase):
+class ShellFixture(fixtures.Fixture):
 
-    # Patch os.environ to avoid required auth info.
     def setUp(self):
-        """Run before each test."""
-        self.old_environment = os.environ.copy()
-        os.environ = {
-            'NOVA_USERNAME': 'username',
-            'NOVA_PASSWORD': 'password',
-            'NOVA_PROJECT_ID': 'project_id',
-            'OS_COMPUTE_API_VERSION': '1.1',
-            'NOVA_URL': 'http://no.where',
-        }
-
+        super(ShellFixture, self).setUp()
         self.shell = novaclient.shell.OpenStackComputeShell()
 
-        #HACK(bcwaldon): replace this when we start using stubs
-        self.old_get_client_class = novaclient.client.get_client_class
-        novaclient.client.get_client_class = lambda *_: fakes.FakeClient
-
     def tearDown(self):
-        os.environ = self.old_environment
         # For some method like test_image_meta_bad_action we are
         # testing a SystemExit to be thrown and object self.shell has
         # no time to get instantatiated which is OK in this case, so
         # we make sure the method is there before launching it.
         if hasattr(self.shell, 'cs'):
             self.shell.cs.clear_callstack()
+        super(ShellFixture, self).tearDown()
 
-        #HACK(bcwaldon): replace this when we start using stubs
-        novaclient.client.get_client_class = self.old_get_client_class
+
+class ShellTest(utils.TestCase):
+
+    FAKE_ENV = {
+        'NOVA_USERNAME': 'username',
+        'NOVA_PASSWORD': 'password',
+        'NOVA_PROJECT_ID': 'project_id',
+        'OS_COMPUTE_API_VERSION': '1.1',
+        'NOVA_URL': 'http://no.where',
+    }
+
+    def setUp(self):
+        """Run before each test."""
+        super(ShellTest, self).setUp()
+
+        for var in self.FAKE_ENV:
+            self.useFixture(fixtures.EnvironmentVariable(var,
+                                                         self.FAKE_ENV[var]))
+        self.shell = self.useFixture(ShellFixture()).shell
+
+        self.useFixture(fixtures.MonkeyPatch(
+            'novaclient.client.get_client_class',
+            lambda *_: fakes.FakeClient))
+        self.addCleanup(timeutils.clear_time_override)
 
     def run_command(self, cmd):
         self.shell.main(cmd.split())
@@ -68,6 +81,38 @@ class ShellTest(utils.TestCase):
     def assert_called_anytime(self, method, url, body=None):
         return self.shell.cs.assert_called_anytime(method, url, body)
 
+    def test_agents_list_with_hypervisor(self):
+        self.run_command('agent-list --hypervisor xen')
+        self.assert_called('GET', '/os-agents?hypervisor=xen')
+
+    def test_agents_create(self):
+        self.run_command('agent-create win x86 7.0 '
+                         '/xxx/xxx/xxx '
+                         'add6bb58e139be103324d04d82d8f546 '
+                         'kvm')
+        self.assert_called(
+            'POST', '/os-agents',
+            {'agent': {
+                     'hypervisor': 'kvm',
+                     'os': 'win',
+                     'architecture': 'x86',
+                     'version': '7.0',
+                     'url': '/xxx/xxx/xxx',
+                     'md5hash': 'add6bb58e139be103324d04d82d8f546'}})
+
+    def test_agents_delete(self):
+        self.run_command('agent-delete 1')
+        self.assert_called('DELETE', '/os-agents/1')
+
+    def test_agents_modify(self):
+        self.run_command('agent-modify 1 8.0 /yyy/yyyy/yyyy '
+                         'add6bb58e139be103324d04d82d8f546')
+        self.assert_called('PUT', '/os-agents/1',
+                          {"para": {
+                               "url": "/yyy/yyyy/yyyy",
+                               "version": "8.0",
+                               "md5hash": "add6bb58e139be103324d04d82d8f546"}})
+
     def test_boot(self):
         self.run_command('boot --flavor 1 --image 1 some-server')
         self.assert_called_anytime(
@@ -76,6 +121,47 @@ class ShellTest(utils.TestCase):
                 'flavorRef': '1',
                 'name': 'some-server',
                 'imageRef': '1',
+                'min_count': 1,
+                'max_count': 1,
+                }},
+        )
+
+    def test_boot_image_with(self):
+        self.run_command("boot --flavor 1"
+                         " --image-with test_key=test_value some-server")
+        self.assert_called_anytime(
+            'POST', '/servers',
+            {'server': {
+                'flavorRef': '1',
+                'name': 'some-server',
+                'imageRef': '1',
+                'min_count': 1,
+                'max_count': 1,
+                }},
+        )
+
+    def test_boot_no_image_no_bdms(self):
+        cmd = 'boot --flavor 1 some-server'
+        self.assertRaises(exceptions.CommandError, self.run_command, cmd)
+
+    def test_boot_no_image_bdms(self):
+        self.run_command(
+            'boot --flavor 1 --block_device_mapping vda=blah:::0 some-server'
+        )
+        self.assert_called_anytime(
+            'POST', '/os-volumes_boot',
+            {'server': {
+                'flavorRef': '1',
+                'name': 'some-server',
+                'block_device_mapping': [
+                    {
+                        'volume_size': '',
+                        'volume_id': 'blah',
+                        'delete_on_termination': '0',
+                        'device_name':'vda'
+                    }
+                ],
+                'imageRef': '',
                 'min_count': 1,
                 'max_count': 1,
                 }},
@@ -161,9 +247,36 @@ class ShellTest(utils.TestCase):
         cmd = 'boot some-server --image 1 --file /foo=%s' % invalid_file
         self.assertRaises(exceptions.CommandError, self.run_command, cmd)
 
+    def test_boot_num_instances(self):
+        self.run_command('boot --image 1 --flavor 1 --num-instances 3 server')
+        self.assert_called_anytime(
+            'POST', '/servers',
+            {
+                'server': {
+                    'flavorRef': '1',
+                    'name': 'server',
+                    'imageRef': '1',
+                    'min_count': 1,
+                    'max_count': 3,
+                }
+            })
+
+    def test_boot_invalid_num_instances(self):
+        cmd = 'boot --image 1 --flavor 1 --num-instances 1  server'
+        self.assertRaises(exceptions.CommandError, self.run_command, cmd)
+
     def test_flavor_list(self):
         self.run_command('flavor-list')
+        self.assert_called('GET', '/flavors/aa1/os-extra_specs')
         self.assert_called_anytime('GET', '/flavors/detail')
+
+    def test_flavor_show(self):
+        self.run_command('flavor-show 1')
+        self.assert_called_anytime('GET', '/flavors/1')
+
+    def test_flavor_show_with_alphanum_id(self):
+        self.run_command('flavor-show aa1')
+        self.assert_called_anytime('GET', '/flavors/aa1')
 
     def test_image_show(self):
         self.run_command('image-show 1')
@@ -225,7 +338,7 @@ class ShellTest(utils.TestCase):
         #                   {'rebuild': {'imageRef': 1}})
         self.assert_called('GET', '/images/2')
 
-        self.run_command('rebuild sample-server 1 --rebuild_password asdf')
+        self.run_command('rebuild sample-server 1 --rebuild-password asdf')
         # XXX need a way to test multiple calls
         #self.assert_called('POST', '/servers/1234/action',
         #                   {'rebuild': {'imageRef': 1, 'adminPass': 'asdf'}})
@@ -257,11 +370,25 @@ class ShellTest(utils.TestCase):
         self.assert_called('POST', '/servers/1234/action',
                            {'changePassword': {'adminPass': 'p'}})
 
+    def test_scrub(self):
+        self.run_command('scrub 4ffc664c198e435e9853f2538fbcd7a7')
+        self.assert_called('GET', '/os-networks', pos=-4)
+        self.assert_called('GET', '/os-security-groups?all_tenants=1',
+                          pos=-3)
+        self.assert_called('POST', '/os-networks/1/action',
+                           {"disassociate": None}, pos=-2)
+        self.assert_called('DELETE', '/os-security-groups/1')
+
     def test_show(self):
         self.run_command('show 1234')
         self.assert_called('GET', '/servers/1234', pos=-3)
         self.assert_called('GET', '/flavors/1', pos=-2)
         self.assert_called('GET', '/images/2')
+
+    def test_show_no_image(self):
+        self.run_command('show 9012')
+        self.assert_called('GET', '/servers/9012', pos=-2)
+        self.assert_called('GET', '/flavors/1', pos=-1)
 
     def test_show_bad_id(self):
         self.assertRaises(exceptions.CommandError,
@@ -316,7 +443,7 @@ class ShellTest(utils.TestCase):
 
     def test_dns_create_private_domain(self):
         self.run_command('dns-create-private-domain testdomain '
-                         '--availability_zone av_zone')
+                         '--availability-zone av_zone')
         self.assert_called('PUT', '/os-floating-ip-dns/testdomain')
 
     def test_dns_delete(self):
@@ -341,6 +468,29 @@ class ShellTest(utils.TestCase):
         self.run_command('dns-domains')
         self.assert_called('GET', '/os-floating-ip-dns')
 
+    def test_floating_ip_bulk_list(self):
+        self.run_command('floating-ip-bulk-list')
+        self.assert_called('GET', '/os-floating-ips-bulk')
+
+    def test_floating_ip_bulk_create(self):
+        self.run_command('floating-ip-bulk-create 10.0.0.1/24')
+        self.assert_called('POST', '/os-floating-ips-bulk',
+                           {'floating_ips_bulk_create':
+                                {'ip_range': '10.0.0.1/24'}})
+
+    def test_floating_ip_bulk_create_host_and_interface(self):
+        self.run_command('floating-ip-bulk-create 10.0.0.1/24 --pool testPool \
+                         --interface ethX')
+        self.assert_called('POST', '/os-floating-ips-bulk',
+                           {'floating_ips_bulk_create':
+                                {'ip_range': '10.0.0.1/24',
+                                 'pool': 'testPool', 'interface': 'ethX'}})
+
+    def test_floating_ip_bulk_delete(self):
+        self.run_command('floating-ip-bulk-delete 10.0.0.1/24')
+        self.assert_called('PUT', '/os-floating-ips-bulk/delete',
+                                {'ip_range': '10.0.0.1/24'})
+
     def test_usage_list(self):
         self.run_command('usage-list --start 2000-01-20 --end 2005-02-01')
         self.assert_called('GET',
@@ -349,29 +499,41 @@ class ShellTest(utils.TestCase):
                            'end=2005-02-01T00:00:00&' +
                            'detailed=1')
 
+    def test_usage_list_no_args(self):
+        timeutils.set_time_override(datetime.datetime(2005, 2, 1, 0, 0))
+        self.run_command('usage-list')
+        self.assert_called('GET',
+                           '/os-simple-tenant-usage?' +
+                           'start=2005-01-04T00:00:00&' +
+                           'end=2005-02-02T00:00:00&' +
+                           'detailed=1')
+
+    def test_usage(self):
+        self.run_command('usage --start 2000-01-20 --end 2005-02-01 '
+                         '--tenant test')
+        self.assert_called('GET',
+                           '/os-simple-tenant-usage/test?' +
+                           'start=2000-01-20T00:00:00&' +
+                           'end=2005-02-01T00:00:00')
+
+    def test_usage_no_tenant(self):
+        self.run_command('usage --start 2000-01-20 --end 2005-02-01')
+        self.assert_called('GET',
+                           '/os-simple-tenant-usage/tenant_id?' +
+                           'start=2000-01-20T00:00:00&' +
+                           'end=2005-02-01T00:00:00')
+
     def test_flavor_delete(self):
-        self.run_command("flavor-delete flavordelete")
-        self.assert_called('DELETE', '/flavors/flavordelete')
+        self.run_command("flavor-delete 2")
+        self.assert_called('DELETE', '/flavors/2')
 
     def test_flavor_create(self):
         self.run_command("flavor-create flavorcreate "
-                         "1234 512 10 1 --swap 1024 --ephemeral 10")
-
-        body = {
-            "flavor": {
-                "name": "flavorcreate",
-                "ram": 512,
-                "vcpus": 1,
-                "disk": 10,
-                "OS-FLV-EXT-DATA:ephemeral": 10,
-                "id": 1234,
-                "swap": 1024,
-                "rxtx_factor": 1,
-            }
-        }
-
-        self.assert_called('POST', '/flavors', body, pos=-2)
-        self.assert_called('GET', '/flavors/1')
+                         "1234 512 10 1 --swap 1024 --ephemeral 10 "
+                         "--is-public true")
+        self.assert_called('POST', '/flavors', pos=-3)
+        self.assert_called('GET', '/flavors/1', pos=-2)
+        self.assert_called('GET', '/flavors/1/os-extra_specs', pos=-1)
 
     def test_aggregate_list(self):
         self.run_command('aggregate-list')
@@ -424,62 +586,299 @@ class ShellTest(utils.TestCase):
                                             'block_migration': False,
                                             'disk_over_commit': False}})
         self.run_command('live-migration sample-server hostname \
-                         --block_migrate')
+                         --block-migrate')
         self.assert_called('POST', '/servers/1234/action',
                            {'os-migrateLive': {'host': 'hostname',
                                             'block_migration': True,
                                             'disk_over_commit': False}})
         self.run_command('live-migration sample-server hostname \
-                         --block_migrate --disk_over_commit')
+                         --block-migrate --disk-over-commit')
         self.assert_called('POST', '/servers/1234/action',
                            {'os-migrateLive': {'host': 'hostname',
                                             'block_migration': True,
                                             'disk_over_commit': True}})
 
+    def test_reset_state(self):
+        self.run_command('reset-state sample-server')
+        self.assert_called('POST', '/servers/1234/action',
+                           {'os-resetState': {'state': 'error'}})
+        self.run_command('reset-state sample-server --active')
+        self.assert_called('POST', '/servers/1234/action',
+                           {'os-resetState': {'state': 'active'}})
+
+    def test_services_list(self):
+        self.run_command('service-list')
+        self.assert_called('GET', '/os-services')
+
+    def test_services_list_with_host(self):
+        self.run_command('service-list --host host1')
+        self.assert_called('GET', '/os-services?host=host1')
+
+    def test_services_list_with_servicename(self):
+        self.run_command('service-list --servicename nova-cert')
+        self.assert_called('GET', '/os-services?binary=nova-cert')
+
+    def test_services_list_with_host_servicename(self):
+        self.run_command('service-list --host host1 --servicename nova-cert')
+        self.assert_called('GET', '/os-services?host=host1&binary=nova-cert')
+
+    def test_services_enable(self):
+        self.run_command('service-enable host1 nova-cert')
+        body = {'host': 'host1', 'binary': 'nova-cert'}
+        self.assert_called('PUT', '/os-services/enable', body)
+
+    def test_services_disable(self):
+        self.run_command('service-disable host1 nova-cert')
+        body = {'host': 'host1', 'binary': 'nova-cert'}
+        self.assert_called('PUT', '/os-services/disable', body)
+
+    def test_fixed_ips_get(self):
+        self.run_command('fixed-ip-get 192.168.1.1')
+        self.assert_called('GET', '/os-fixed-ips/192.168.1.1')
+
+    def test_fixed_ips_reserve(self):
+        self.run_command('fixed-ip-reserve 192.168.1.1')
+        body = {'reserve': None}
+        self.assert_called('POST', '/os-fixed-ips/192.168.1.1/action', body)
+
+    def test_fixed_ips_unreserve(self):
+        self.run_command('fixed-ip-unreserve 192.168.1.1')
+        body = {'unreserve': None}
+        self.assert_called('POST', '/os-fixed-ips/192.168.1.1/action', body)
+
+    def test_host_list(self):
+        self.run_command('host-list')
+        self.assert_called('GET', '/os-hosts')
+
+    def test_host_list_with_zone(self):
+        self.run_command('host-list --zone nova')
+        self.assert_called('GET', '/os-hosts?zone=nova')
+
     def test_host_update_status(self):
         self.run_command('host-update sample-host_1 --status enabled')
-        body = {'status': 'enabled'}
+        body = {'host': {'status': 'enabled'}}
         self.assert_called('PUT', '/os-hosts/sample-host_1', body)
 
     def test_host_update_maintenance(self):
         self.run_command('host-update sample-host_2 --maintenance enable')
-        body = {'maintenance_mode': 'enable'}
+        body = {'host': {'maintenance_mode': 'enable'}}
         self.assert_called('PUT', '/os-hosts/sample-host_2', body)
 
     def test_host_update_multiple_settings(self):
         self.run_command('host-update sample-host_3 '
                          '--status disabled --maintenance enable')
-        body = {'status': 'disabled', 'maintenance_mode': 'enable'}
+        body = {'host': {'status': 'disabled', 'maintenance_mode': 'enable'}}
         self.assert_called('PUT', '/os-hosts/sample-host_3', body)
 
     def test_host_startup(self):
         self.run_command('host-action sample-host --action startup')
-        self.assert_called('GET', '/os-hosts/sample-host/startup')
+        self.assert_called(
+            'POST', '/os-hosts/sample-host/action', {'startup': None})
 
     def test_host_shutdown(self):
         self.run_command('host-action sample-host --action shutdown')
-        self.assert_called('GET', '/os-hosts/sample-host/shutdown')
+        self.assert_called(
+            'POST', '/os-hosts/sample-host/action', {'shutdown': None})
 
     def test_host_reboot(self):
         self.run_command('host-action sample-host --action reboot')
-        self.assert_called('GET', '/os-hosts/sample-host/reboot')
+        self.assert_called(
+            'POST', '/os-hosts/sample-host/action', {'reboot': None})
+
+    def test_coverage_start(self):
+        self.run_command('coverage-start')
+        self.assert_called('POST', '/os-coverage/action')
+
+    def test_coverage_start_with_combine(self):
+        self.run_command('coverage-start --combine')
+        body = {'start': {'combine': True}}
+        self.assert_called('POST', '/os-coverage/action', body)
+
+    def test_coverage_stop(self):
+        self.run_command('coverage-stop')
+        self.assert_called_anytime('POST', '/os-coverage/action')
+
+    def test_coverage_report(self):
+        self.run_command('coverage-report report')
+        self.assert_called_anytime('POST', '/os-coverage/action')
+
+    def test_coverage_report_with_html(self):
+        self.run_command('coverage-report report --html')
+        body = {'report': {'html': True, 'file': 'report'}}
+        self.assert_called_anytime('POST', '/os-coverage/action', body)
+
+    def test_coverage_report_with_xml(self):
+        self.run_command('coverage-report report --xml')
+        body = {'report': {'xml': True, 'file': 'report'}}
+        self.assert_called_anytime('POST', '/os-coverage/action', body)
+
+    def test_hypervisor_list(self):
+        self.run_command('hypervisor-list')
+        self.assert_called('GET', '/os-hypervisors')
+
+    def test_hypervisor_list_matching(self):
+        self.run_command('hypervisor-list --matching hyper')
+        self.assert_called('GET', '/os-hypervisors/hyper/search')
+
+    def test_hypervisor_servers(self):
+        self.run_command('hypervisor-servers hyper')
+        self.assert_called('GET', '/os-hypervisors/hyper/servers')
+
+    def test_hypervisor_show(self):
+        self.run_command('hypervisor-show 1234')
+        self.assert_called('GET', '/os-hypervisors/1234')
+
+    def test_hypervisor_uptime(self):
+        self.run_command('hypervisor-uptime 1234')
+        self.assert_called('GET', '/os-hypervisors/1234/uptime')
+
+    def test_hypervisor_stats(self):
+        self.run_command('hypervisor-stats')
+        self.assert_called('GET', '/os-hypervisors/statistics')
 
     def test_quota_show(self):
-        self.run_command('quota-show test')
+        self.run_command('quota-show --tenant test')
         self.assert_called('GET', '/os-quota-sets/test')
 
+    def test_quota_show_no_tenant(self):
+        self.run_command('quota-show')
+        self.assert_called('GET', '/os-quota-sets/tenant_id')
+
     def test_quota_defaults(self):
-        self.run_command('quota-defaults test')
+        self.run_command('quota-defaults --tenant test')
         self.assert_called('GET', '/os-quota-sets/test/defaults')
 
+    def test_quota_defaults_no_nenant(self):
+        self.run_command('quota-defaults')
+        self.assert_called('GET', '/os-quota-sets/tenant_id/defaults')
+
     def test_quota_update(self):
-        self.run_command('quota-update test --instances=5')
-        self.assert_called('PUT', '/os-quota-sets/test')
+        self.run_command(
+                        'quota-update 97f4c221bff44578b0300df4ef119353 \
+                         --instances=5')
+        self.assert_called('PUT',
+                        '/os-quota-sets/97f4c221bff44578b0300df4ef119353')
+
+    def test_quota_update_error(self):
+        self.assertRaises(exceptions.CommandError,
+                          self.run_command,
+                         'quota-update 7f4c221-bff4-4578-b030-0df4ef119353 \
+                          --instances=5')
 
     def test_quota_class_show(self):
         self.run_command('quota-class-show test')
         self.assert_called('GET', '/os-quota-class-sets/test')
 
     def test_quota_class_update(self):
-        self.run_command('quota-class-update test --instances=5')
-        self.assert_called('PUT', '/os-quota-class-sets/test')
+        self.run_command('quota-class-update 97f4c221bff44578b0300df4ef119353 \
+                          --instances=5')
+        self.assert_called('PUT',
+                       '/os-quota-class-sets/97f4c221bff44578b0300df4ef119353')
+
+    def test_network_list(self):
+        self.run_command('network-list')
+        self.assert_called('GET', '/os-networks')
+
+    def test_network_show(self):
+        self.run_command('network-show 1')
+        self.assert_called('GET', '/os-networks/1')
+
+    def test_cloudpipe_list(self):
+        self.run_command('cloudpipe-list')
+        self.assert_called('GET', '/os-cloudpipe')
+
+    def test_cloudpipe_create(self):
+        self.run_command('cloudpipe-create myproject')
+        body = {'cloudpipe': {'project_id': "myproject"}}
+        self.assert_called('POST', '/os-cloudpipe', body)
+
+    def test_cloudpipe_configure(self):
+        self.run_command('cloudpipe-configure 192.168.1.1 1234')
+        body = {'configure_project': {'vpn_ip': "192.168.1.1",
+                                      'vpn_port': '1234'}}
+        self.assert_called('PUT', '/os-cloudpipe/configure-project', body)
+
+    def test_network_associate_host(self):
+        self.run_command('network-associate-host 1 testHost')
+        body = {'associate_host': 'testHost'}
+        self.assert_called('POST', '/os-networks/1/action', body)
+
+    def test_network_associate_project(self):
+        self.run_command('network-associate-project 1')
+        body = {'id': "1"}
+        self.assert_called('POST', '/os-networks/add', body)
+
+    def test_network_disassociate_host(self):
+        self.run_command('network-disassociate --host-only 1 2')
+        body = {'disassociate_host': None}
+        self.assert_called('POST', '/os-networks/2/action', body)
+
+    def test_network_disassociate_project(self):
+        self.run_command('network-disassociate --project-only 1 2')
+        body = {'disassociate_project': None}
+        self.assert_called('POST', '/os-networks/2/action', body)
+
+    def test_network_create_v4(self):
+        self.run_command('network-create --fixed-range-v4 10.0.1.0/24 \
+                         --dns1 10.0.1.254 new_network')
+        body = {'network': {'cidr': '10.0.1.0/24', 'label': 'new_network',
+                            'dns1': '10.0.1.254'}}
+        self.assert_called('POST', '/os-networks', body)
+
+    def test_network_create_v6(self):
+        self.run_command('network-create --fixed-range-v6 2001::/64 \
+                          new_network')
+        body = {'network': {'cidr_v6': '2001::/64', 'label': 'new_network'}}
+        self.assert_called('POST', '/os-networks', body)
+
+    def test_backup(self):
+        self.run_command('backup sample-server back1 daily 1')
+        self.assert_called('POST', '/servers/1234/action',
+                           {'createBackup': {'name': 'back1',
+                                             'backup_type': 'daily',
+                                             'rotation': '1'}})
+        self.run_command('backup 1234 back1 daily 1')
+        self.assert_called('POST', '/servers/1234/action',
+                           {'createBackup': {'name': 'back1',
+                                             'backup_type': 'daily',
+                                             'rotation': '1'}})
+
+    def test_absolute_limits(self):
+        self.run_command('absolute-limits')
+        self.assert_called('GET', '/limits')
+
+        self.run_command('absolute-limits --reserved')
+        self.assert_called('GET', '/limits?reserved=1')
+
+    def test_evacuate(self):
+        self.run_command('evacuate sample-server new_host')
+        self.assert_called('POST', '/servers/1234/action',
+                           {'evacuate': {'host': 'new_host',
+                                         'onSharedStorage': False}})
+        self.run_command('evacuate sample-server new_host '
+                            '--password NewAdminPass')
+        self.assert_called('POST', '/servers/1234/action',
+                           {'evacuate': {'host': 'new_host',
+                                         'onSharedStorage': False,
+                                         'adminPass': 'NewAdminPass'}})
+        self.run_command('evacuate sample-server new_host')
+        self.assert_called('POST', '/servers/1234/action',
+                           {'evacuate': {'host': 'new_host',
+                                         'onSharedStorage': False}})
+        self.run_command('evacuate sample-server new_host '
+                            '--on-shared-storage')
+        self.assert_called('POST', '/servers/1234/action',
+                           {'evacuate': {'host': 'new_host',
+                                         'onSharedStorage': True}})
+
+    def test_get_password(self):
+        self.run_command('get-password sample-server /foo/id_rsa')
+        self.assert_called('GET', '/servers/1234/os-server-password')
+
+    def test_clear_password(self):
+        self.run_command('clear-password sample-server')
+        self.assert_called('DELETE', '/servers/1234/os-server-password')
+
+    def test_availability_zone_list(self):
+            self.run_command('availability-zone-list')
+            self.assert_called('GET', '/os-availability-zone/detail')

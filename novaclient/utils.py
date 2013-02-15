@@ -16,13 +16,13 @@ def arg(*args, **kwargs):
     return _decorator
 
 
-def env(*vars, **kwargs):
+def env(*args, **kwargs):
     """
     returns the first environment variable set
     if none are non-empty, defaults to '' or keyword arg default
     """
-    for v in vars:
-        value = os.environ.get(v, None)
+    for arg in args:
+        value = os.environ.get(arg, None)
         if value:
             return value
     return kwargs.get('default', '')
@@ -40,6 +40,21 @@ def add_arg(f, *args, **kwargs):
         # Because of the sematics of decorator composition if we just append
         # to the options list positional options will appear to be backwards.
         f.arguments.insert(0, (args, kwargs))
+
+
+def bool_from_str(val):
+    """Convert a string representation of a bool into a bool value"""
+
+    if not val:
+        return False
+    try:
+        return bool(int(val))
+    except ValueError:
+        if val.lower() in ['true', 'yes', 'y']:
+            return True
+        if val.lower() in ['false', 'no', 'n']:
+            return False
+        raise
 
 
 def add_resource_manager_extra_kwargs_hook(f, hook):
@@ -123,10 +138,14 @@ def pretty_choice_list(l):
     return ', '.join("'%s'" % i for i in l)
 
 
-def print_list(objs, fields, formatters={}):
+def print_list(objs, fields, formatters={}, sortby_index=0):
+    if sortby_index == None:
+        sortby = None
+    else:
+        sortby = fields[sortby_index]
     mixed_case_fields = ['serverId']
     pt = prettytable.PrettyTable([f for f in fields], caching=False)
-    pt.aligns = ['l' for f in fields]
+    pt.align = 'l'
 
     for o in objs:
         row = []
@@ -142,24 +161,45 @@ def print_list(objs, fields, formatters={}):
                 row.append(data)
         pt.add_row(row)
 
-    print pt.get_string(sortby=fields[0])
+    if sortby is not None:
+        print pt.get_string(sortby=sortby)
+    else:
+        print pt.get_string()
 
 
-def print_dict(d, property="Property"):
-    pt = prettytable.PrettyTable([property, 'Value'], caching=False)
-    pt.aligns = ['l', 'l']
-    [pt.add_row(list(r)) for r in d.iteritems()]
-    print pt.get_string(sortby=property)
+def print_dict(d, dict_property="Property"):
+    pt = prettytable.PrettyTable([dict_property, 'Value'], caching=False)
+    pt.align = 'l'
+    for k, v in d.iteritems():
+        # convert dict to str to check length
+        if isinstance(v, dict):
+            v = str(v)
+        # if value has a newline, add in multiple rows
+        # e.g. fault with stacktrace
+        if v and isinstance(v, basestring) and r'\n' in v:
+            lines = v.strip().split(r'\n')
+            col1 = k
+            for line in lines:
+                pt.add_row([col1, line])
+                col1 = ''
+        else:
+            pt.add_row([k, v])
+    print pt.get_string()
 
 
 def find_resource(manager, name_or_id):
     """Helper for the _find_* methods."""
     # first try to get entity as integer id
     try:
-        if isinstance(name_or_id, int) or name_or_id.isdigit():
+        is_intid = isinstance(name_or_id, int) or name_or_id.isdigit()
+    except AttributeError:
+        is_intid = False
+
+    if is_intid:
+        try:
             return manager.get(int(name_or_id))
-    except exceptions.NotFound:
-        pass
+        except exceptions.NotFound:
+            pass
 
     # now try to get entity as uuid
     try:
@@ -167,6 +207,13 @@ def find_resource(manager, name_or_id):
         return manager.get(name_or_id)
     except (ValueError, exceptions.NotFound):
         pass
+
+    # for str id which is not uuid (for Flavor search currently)
+    if getattr(manager, 'is_alphanum_id_allowed', False):
+        try:
+            return manager.get(name_or_id)
+        except exceptions.NotFound:
+            pass
 
     try:
         try:
@@ -176,15 +223,14 @@ def find_resource(manager, name_or_id):
 
         # finally try to find entity by name
         try:
-            return manager.find(name=name_or_id)
+            resource = getattr(manager, 'resource_class', None)
+            name_attr = resource.NAME_ATTR if resource else 'name'
+            kwargs = {name_attr: name_or_id}
+            return manager.find(**kwargs)
         except exceptions.NotFound:
-            try:
-                # Volumes does not have name, but display_name
-                return manager.find(display_name=name_or_id)
-            except exceptions.NotFound:
-                msg = "No %s with a name or ID of '%s' exists." % \
-                    (manager.resource_class.__name__.lower(), name_or_id)
-                raise exceptions.CommandError(msg)
+            msg = "No %s with a name or ID of '%s' exists." % \
+                (manager.resource_class.__name__.lower(), name_or_id)
+            raise exceptions.CommandError(msg)
     except exceptions.NoUniqueMatch:
         msg = ("Multiple %s matches found for '%s', use an ID to be more"
                " specific." % (manager.resource_class.__name__.lower(),
@@ -259,3 +305,16 @@ def slugify(value):
     value = unicodedata.normalize('NFKD', value).encode('ascii', 'ignore')
     value = unicode(_slugify_strip_re.sub('', value).strip().lower())
     return _slugify_hyphenate_re.sub('-', value)
+
+
+def is_uuid_like(val):
+    """
+    The UUID which doesn't contain hyphens or 'A-F' is allowed.
+    """
+    try:
+        if uuid.UUID(val) and val.isalnum() and val.islower():
+            return True
+        else:
+            return False
+    except (TypeError, ValueError, AttributeError):
+        return False

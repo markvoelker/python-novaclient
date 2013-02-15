@@ -28,6 +28,9 @@ class ServiceCatalog(object):
     def get_token(self):
         return self.catalog['access']['token']['id']
 
+    def get_tenant_id(self):
+        return self.catalog['access']['token']['tenant']['id']
+
     def url_for(self, attr=None, filter_value=None,
                     service_type=None, endpoint_type='publicURL',
                     service_name=None, volume_service_name=None):
@@ -39,7 +42,10 @@ class ServiceCatalog(object):
             # We have a bastardized service catalog. Treat it special. :/
             for endpoint in self.catalog['endpoints']:
                 if not filter_value or endpoint[attr] == filter_value:
-                    matching_endpoints.append(endpoint)
+                    # Ignore 1.0 compute endpoints
+                    if endpoint.get("type") == 'compute' and \
+                            endpoint.get('versionId') in (None, '1.1', '2'):
+                        matching_endpoints.append(endpoint)
             if not matching_endpoints:
                 raise novaclient.exceptions.EndpointNotFound()
 
@@ -64,7 +70,12 @@ class ServiceCatalog(object):
 
             endpoints = service['endpoints']
             for endpoint in endpoints:
-                if not filter_value or endpoint.get(attr) == filter_value:
+                # Ignore 1.0 compute endpoints
+                if service.get("type") == 'compute' and \
+                            endpoint.get('versionId', '2') not in ('1.1', '2'):
+                    continue
+                if not filter_value or \
+                        endpoint.get(attr).lower() == filter_value.lower():
                     endpoint["serviceName"] = service.get("name")
                     matching_endpoints.append(endpoint)
 
