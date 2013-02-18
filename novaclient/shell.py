@@ -33,6 +33,13 @@ HAS_KEYRING = False
 try:
     import keyring
     HAS_KEYRING = True
+    try:
+        if isinstance(keyring.get_keyring(), keyring.backend.GnomeKeyring):
+            KeyringIOError = gnomekeyring.IOError
+        else:
+            KeyringIOError = IOError
+    except Exception:
+        KeyringIOError = IOError
 except ImportError:
     pass
 
@@ -146,7 +153,7 @@ class SecretsHelper(object):
             block = keyring.get_password('novaclient_auth', self._make_key())
             if block:
                 _token, management_url, _tenant_id = block.split('|', 2)
-        except ValueError:
+        except (KeyringIOError, ValueError):
             pass
         return management_url
 
@@ -163,7 +170,7 @@ class SecretsHelper(object):
             block = keyring.get_password('novaclient_auth', self._make_key())
             if block:
                 token, _management_url, _tenant_id = block.split('|', 2)
-        except ValueError:
+        except (KeyringIOError, ValueError):
             pass
         return token
 
@@ -176,7 +183,7 @@ class SecretsHelper(object):
             block = keyring.get_password('novaclient_auth', self._make_key())
             if block:
                 _token, _management_url, tenant_id = block.split('|', 2)
-        except ValueError:
+        except (KeyringIOError, ValueError):
             pass
         return tenant_id
 
@@ -428,12 +435,15 @@ class OpenStackComputeShell(object):
 
     def _discover_via_python_path(self):
         for (module_loader, name, _ispkg) in pkgutil.iter_modules():
-            if name.endswith('python_novaclient_ext'):
+            if name.endswith('_python_novaclient_ext'):
                 if not hasattr(module_loader, 'load_module'):
                     # Python 2.6 compat: actually get an ImpImporter obj
                     module_loader = module_loader.find_module(name)
 
                 module = module_loader.load_module(name)
+                if hasattr(module, 'extension_name'):
+                    name = module.extension_name
+
                 yield name, module
 
     def _discover_via_contrib_path(self, version):
